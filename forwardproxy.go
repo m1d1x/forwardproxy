@@ -281,7 +281,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			fmt.Errorf("unsupported HTTP major version: %d", r.ProtoMajor))
 	}
 
-	ctx := context.Background()
+	ctx := r.Context()
 	if !h.HideIP {
 		ctxHeader := make(http.Header)
 		for k, v := range r.Header {
@@ -341,6 +341,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				fmt.Errorf("hostname %s is not allowed", r.URL.Hostname()))
 		}
 		defer targetConn.Close()
+		stopCancel := context.AfterFunc(ctx, func() { _ = targetConn.Close() })
+		defer stopCancel()
 
 		switch r.ProtoMajor {
 		case 1: // http1: hijack the whole flow

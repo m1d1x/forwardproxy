@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -241,46 +242,31 @@ func TestConnectAuthWrongProbeResist(t *testing.T) {
 
 // test that responses on http redirect port are same
 func TestConnectAuthWrongProbeResistRedir(t *testing.T) {
-	const useTLS = false
-	httpProxyVer := "HTTP/1.1"
 	for _, wrongCreds := range credentialsWrong {
-		for _, httpTargetVer := range testHTTPTargetVersions {
-			// request test target
+		for _, targetVersion := range testHTTPTargetVersions {
 			for _, resource := range testResources {
-				responseProbeResist, err := connectAndGetViaProxy(caddyTestTarget.addr, resource, changePort(caddyForwardProxyProbeResist.addr, caddyForwardProxyProbeResist.httpRedirPort), httpTargetVer, wrongCreds, httpProxyVer, useTLS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// get response from reference server without forwardproxy and compare them
-				responseReference, err := connectAndGetViaProxy(caddyTestTarget.addr, resource, changePort(caddyDummyProbeResist.addr, caddyDummyProbeResist.httpRedirPort), httpTargetVer, wrongCreds, httpProxyVer, useTLS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if responseProbeResist.StatusCode != responseReference.StatusCode {
-					t.Fatalf("Expected response: %d, Got: %d\n",
-						responseReference.StatusCode, responseProbeResist.StatusCode)
-				}
-				if err = responsesAreEqual(responseProbeResist, responseReference); err != nil {
-					t.Fatal(err)
-				}
-			}
-			// request self
-			for _, resource := range testResources {
-				responseProbeResist, err := connectAndGetViaProxy(caddyForwardProxyProbeResist.addr, resource, changePort(caddyForwardProxyProbeResist.addr, caddyForwardProxyProbeResist.httpRedirPort), httpTargetVer, wrongCreds, httpProxyVer, useTLS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				// get response from reference server without forwardproxy and compare them
-				responseReference, err := connectAndGetViaProxy(caddyDummyProbeResist.addr, resource, changePort(caddyDummyProbeResist.addr, caddyDummyProbeResist.httpRedirPort), httpTargetVer, wrongCreds, httpProxyVer, useTLS)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if responseProbeResist.StatusCode != responseReference.StatusCode {
-					t.Fatalf("Expected response: %d, Got: %d\n",
-						responseReference.StatusCode, responseProbeResist.StatusCode)
-				}
-				if err = responsesAreEqual(responseProbeResist, responseReference); err != nil {
-					t.Fatal(err)
+				for _, self := range []bool{false, true} {
+					proxyTarget, referenceTarget := caddyTestTarget.addr, caddyTestTarget.addr
+					if self {
+						proxyTarget = caddyForwardProxyProbeResist.addr
+						referenceTarget = caddyDummyProbeResist.addr
+					}
+					responseProxy, proxyErr := connectAndGetViaProxy(proxyTarget, resource, changePort(caddyForwardProxyProbeResist.addr, caddyForwardProxyProbeResist.httpRedirPort), targetVersion, wrongCreds, "HTTP/1.1", false)
+					responseReference, referenceErr := connectAndGetViaProxy(referenceTarget, resource, changePort(caddyDummyProbeResist.addr, caddyDummyProbeResist.httpRedirPort), targetVersion, wrongCreds, "HTTP/1.1", false)
+					// Modern Caddy may close plaintext CONNECT on its redirect listener.
+					// The hidden proxy must be indistinguishable from the ordinary site.
+					if closedRedirect(proxyErr) && closedRedirect(referenceErr) {
+						continue
+					}
+					if proxyErr != nil || referenceErr != nil {
+						t.Fatalf("redirect differs: proxy=%v reference=%v", proxyErr, referenceErr)
+					}
+					if responseProxy.StatusCode != responseReference.StatusCode {
+						t.Fatalf("redirect status differs: %d/%d", responseProxy.StatusCode, responseReference.StatusCode)
+					}
+					if err := responsesAreEqual(responseProxy, responseReference); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 		}
@@ -445,4 +431,10 @@ func changePort(inputAddr, toPort string) string {
 		panic(err)
 	}
 	return net.JoinHostPort(host, toPort)
+}
+
+// FIN and RST both terminate the request before an HTTP response. Their
+// ordering depends on whether net/http consumed the unread CONNECT bytes.
+func closedRedirect(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, syscall.ECONNRESET)
 }
