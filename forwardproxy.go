@@ -507,6 +507,13 @@ func (h Handler) servePacFile(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// ContextKeyDial carries a dial that a handler running before this one put on
+// the request context: it owns the destination of that one CONNECT, so the
+// ACL and the resolver are not consulted. The Hikkari edge serves its
+// UDP-over-TCP fallback this way, behind the same auth and the same Naive
+// padding as every other tunnel.
+type ContextKeyDial struct{}
+
 // dialContextCheckACL enforces Access Control List and calls fp.DialContext
 func (h Handler) dialContextCheckACL(ctx context.Context, network, hostPort string) (net.Conn, error) {
 	var conn net.Conn
@@ -515,6 +522,14 @@ func (h Handler) dialContextCheckACL(ctx context.Context, network, hostPort stri
 		// return nil, &proxyError{S: "Network " + network + " is not supported", Code: http.StatusBadRequest}
 		return nil, caddyhttp.Error(http.StatusBadRequest,
 			fmt.Errorf("network %s is not supported", network))
+	}
+
+	if dial, ok := ctx.Value(ContextKeyDial{}).(func(context.Context) (net.Conn, error)); ok {
+		conn, err := dial(ctx)
+		if err != nil {
+			return nil, caddyhttp.Error(http.StatusBadGateway, err)
+		}
+		return conn, nil
 	}
 
 	host, port, err := net.SplitHostPort(hostPort)
